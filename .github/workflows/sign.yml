@@ -1,0 +1,138 @@
+name: sign
+
+on:
+  # push:
+  #   branches: [main]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+  schedule:
+    # GMT 20,22,4,6,7 Beijing 4,6,12,14,15 every day
+    - cron: '0 20 * * *'
+    - cron: '0 22 * * *'
+    - cron: '0 4 * * *'
+    - cron: '0 6 * * *'
+    - cron: '0 7 * * *'
+
+env:
+  REQUIRED_DOTNET_VERSION: 7.x
+  ${{secrets.CONSTR1}}: ${{secrets.CONSTR2}}
+
+jobs:
+  precheck:
+    name: precheck if need to run
+    runs-on: ubuntu-22.04
+    outputs:
+      overdue: ${{steps.check-overdue.outcome}}
+      gkjy: ${{steps.check-gkjy.outcome}}
+      pcbeta: ${{steps.check-pcbeta.outcome}}
+    steps:
+      - id: record-begin-time
+        uses: ali50m/actions/record-begin-time@main
+
+      - uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{secrets.SSH_PRIVATE_KEY}}
+
+      - name: clone repo
+        run: |
+          git clone git@github.com:${{github.repository_owner}}/${{secrets.REPO}}.git
+
+      - id: build-testproj
+        working-directory: ./${{secrets.REPO}}
+        run: |
+          dotnet build ./src/PlaywrightTests/PlaywrightTests.csproj
+
+      - id: check-overdue
+        # 超过overdue返回failure，未超过返回success
+        continue-on-error: true
+        working-directory: ./${{secrets.REPO}}
+        run: |
+          dotnet test --no-build --filter "FullyQualifiedName=PlaywrightTests.GithubActionTests.Failure_IfNowIsAfter1430" --logger "console;verbosity=detailed"
+
+      - id: check-gkjy
+        # 签到完成返回success，未完成返回failure
+        continue-on-error: true
+        working-directory: ./${{secrets.REPO}}
+        run: |
+          dotnet test --no-build --filter "FullyQualifiedName=PlaywrightTests.GithubActionTests.CheckGkjyFinished" --logger "console;verbosity=detailed"
+
+      - id: check-pcbeta
+        # 签到完成返回success，未完成返回failure
+        continue-on-error: true
+        working-directory: ./${{secrets.REPO}}
+        run: |
+          dotnet test --no-build --filter "FullyQualifiedName=PlaywrightTests.GithubActionTests.CheckPcBetaFinished" --logger "console;verbosity=detailed"
+
+      - name: echo
+        run: |
+          outcomes=$(cat <<-END
+          check-overdue:        ${{steps.check-overdue.outcome}}
+          check-gkjy:           ${{steps.check-gkjy.outcome}}
+          check-pcbeta:         ${{steps.check-pcbeta.outcome}}
+          END
+          )
+          echo "${outcomes}"
+          echo "${outcomes}" >> $GITHUB_STEP_SUMMARY
+
+      - name: report-error
+        # 超时,但是仍然有签到未完成，发送失败消息
+        if: ${{steps.check-overdue.outcome != 'success' && (steps.check-gkjy.outcome != 'success' || steps.check-pcbeta.outcome != 'success')}}
+        uses: ali50m/actions/new-weixin-api-message@main
+        with:
+          weixin: ${{secrets.WEIXIN}}
+          result: 🍄
+          now: ${{steps.record-begin-time.outputs.now}}
+
+  main-job:
+    name: run commands and collect message
+    runs-on: windows-2022
+    needs: [precheck]
+    # 仅在未超时,且有签到未完成时运行
+    if: ${{needs.precheck.outputs.overdue == 'success' && (needs.precheck.outputs.gkjy != 'success' || needs.precheck.outputs.pcbeta != 'success')}}
+    steps:
+      - uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{secrets.SSH_PRIVATE_KEY}}
+
+      - name: clone repo
+        run: |
+          git clone git@github.com:${{github.repository_owner}}/${{secrets.REPO}}.git
+
+      - id: build-testproj
+        working-directory: ./${{secrets.REPO}}
+        run: |
+          dotnet build ./src/PlaywrightTests/PlaywrightTests.csproj
+
+      - id: install-playwright
+        continue-on-error: true
+        working-directory: ./${{secrets.REPO}}
+        run: |
+          dotnet test --no-build --filter "FullyQualifiedName=PlaywrightTests.GithubActionTests.Install_DefaultBrowser"
+
+      - id: sign-gkjy
+        continue-on-error: true
+        working-directory: ./${{secrets.REPO}}
+        # gkjy签到未完成
+        if: ${{needs.precheck.outputs.gkjy != 'success'}}
+        run: |
+          dotnet test --no-build --filter "FullyQualifiedName=PlaywrightTests.GithubActionTests.SignGkjy" --logger "console;verbosity=detailed"
+
+      - id: sign-pcbeta
+        continue-on-error: true
+        working-directory: ./${{secrets.REPO}}
+        # pcbeta签到未完成
+        if: ${{needs.precheck.outputs.pcbeta != 'success'}}
+        run: |
+          dotnet test --no-build --filter "FullyQualifiedName=PlaywrightTests.GithubActionTests.SignPcbeta" --logger "console;verbosity=detailed"
+
+      - name: echo
+        run: |
+          $outcomes = @"
+          install-playwright:   ${{steps.install-playwright.outcome}}
+          sign-gkjy:            ${{steps.sign-gkjy.outcome}}
+          sign-pcbeta:          ${{steps.sign-pcbeta.outcome}}
+          "@
+          echo "${outcomes}"
+          echo "${outcomes}" >> $Env:GITHUB_STEP_SUMMARY
